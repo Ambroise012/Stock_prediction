@@ -1,219 +1,155 @@
-import os
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3" 
-import sys
-import time
-import json
-import random
-import logging
-from datetime import datetime, timedelta
-
-import requests
-import yfinance as yf
+import subprocess
 import numpy as np
 import pandas as pd
+import yfinance as yf
+import streamlit as st
+import tensorflow as tf
 import matplotlib.pyplot as plt
-from keras import Input
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras.layers import Dropout
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense
+from sklearn.preprocessing import StandardScaler
+import os, sys
+import json
 
 from src.config import config
-from src.predict_utils import get_company_name, fetch_stock_data, create_dataset
+from src.predict_utils import download_data, add_features
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-ch = logging.StreamHandler()
-ch.setLevel(logging.INFO)
-formatter = logging.Formatter('%(levelname)s: %(message)s')
-ch.setFormatter(formatter)
-logger.addHandler(ch)
+def inverse_cum_logret_to_price(last_price, cum_logret_preds):
+    return last_price * np.exp(cum_logret_preds)
 
-# Parameters # set in config file
-ticker = sys.argv[1] # get ticker from arg 
+def predict_stock(TICKER: str):
+    """Run GRU prediction for a given stock ticker."""
+    LOOK_BACK = config.predict.look_back
+    HORIZON = config.predict.horizon
+    MODELDIR = "models"
 
-# =========================
-# Fetch data
-# =========================
-df_ticker = fetch_stock_data(ticker)
+    MODEL_PATH = os.path.join(MODELDIR, f"{TICKER}_gru.h5")
+    METRICS_PATH = os.path.join(MODELDIR, f"{TICKER}_metrics.json")
+    SCALER_MEAN = os.path.join(MODELDIR, f"{TICKER}_scaler_mean.npy")
+    SCALER_SCALE = os.path.join(MODELDIR, f"{TICKER}_scaler_scale.npy")
 
-if isinstance(df_ticker, dict):
-    df_ticker = df_ticker.get(ticker)
+    # ----------------------------
+    # load model and scaler
+    # ----------------------------
+    if not os.path.exists(MODEL_PATH):
+        subprocess.run([sys.executable, "-m", "src.train", TICKER], check=True)
 
-if df_ticker is None or df_ticker.empty:
-    logger.error(f"No data available for {ticker}.")
-    sys.exit(1)
+    model = tf.keras.models.load_model(MODEL_PATH)
+    scaler = StandardScaler()
+    scaler.mean_ = np.load(SCALER_MEAN)
+    scaler.scale_ = np.load(SCALER_SCALE)
 
-# =========================
-# Feature Engineering
-# =========================
+    # ----------------------------
+    # download last days and prep features
+    # ----------------------------
+    df = download_data(TICKER)
+    df = add_features(df)
 
-# Percentage change features
-df_ticker["Return"] = df_ticker["Close"].pct_change()
-df_ticker["Volume_Change"] = df_ticker["Volume"].pct_change()
+    try:
+        last_price = float(df["Close"].iloc[-1])
+    except KeyError:
+        close_col = [c for c in df.columns if "Close" in str(c)][0]
+        last_price = float(df[close_col].iloc[-1])
 
-# Moving Averages
-df_ticker["SMA_5"] = df_ticker["Close"].rolling(window=5).mean()
-df_ticker["SMA_20"] = df_ticker["Close"].rolling(window=20).mean()
+    # Flatten MultiIndex columns if needed
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = ["_".join([str(c) for c in col if c]) for col in df.columns]
+    else:
+        df.columns = [str(c) for c in df.columns]
 
-# Exponential Moving Averages
-df_ticker["EMA_12"] = df_ticker["Close"].ewm(span=12, adjust=False).mean()
-df_ticker["EMA_26"] = df_ticker["Close"].ewm(span=26, adjust=False).mean()
+    exclude = {"Open", "High", "Low", "Close", "Adj Close", "log_close", "log_ret"}
+    feature_cols = [c for c in df.columns if c not in exclude and not c.startswith("cum_logret_h")]
+    feature_cols = sorted(feature_cols)
 
-# MACD
-df_ticker["MACD"] = df_ticker["EMA_12"] - df_ticker["EMA_26"]
+    latest = df.iloc[-LOOK_BACK:].copy()
+    arr = latest[feature_cols].values
+    X_input_s = scaler.transform(arr).reshape(1, LOOK_BACK, len(feature_cols))
 
-# RSI
-delta = df_ticker["Close"].diff()
-gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-rs = gain / loss
-df_ticker["RSI"] = 100 - (100 / (1 + rs))
+    # ----------------------------
+    # predict
+    # ----------------------------
+    pred_cum_logret = model.predict(X_input_s, verbose=0)[0]
+    pred_prices = inverse_cum_logret_to_price(last_price, pred_cum_logret)
 
-# Volatility (rolling std of returns)
-df_ticker["Volatility"] = df_ticker["Return"].rolling(window=10).std()
-
-# Drop missing values
-df_ticker.dropna(inplace=True)
-
-df_ticker.replace([np.inf, -np.inf], np.nan, inplace=True)
-df_ticker.dropna(inplace=True)
-# =========================
-# Preprocess: use percentage change instead of raw close
-# =========================
-feature_cols = ["Return", "Volume_Change", "SMA_5", "SMA_20",
-                "EMA_12", "EMA_26", "MACD", "RSI", "Volatility"]
-
-values = df_ticker[feature_cols].values
-# Scale all features
-scaler_all = MinMaxScaler()
-scaled_values = scaler_all.fit_transform(df_ticker[feature_cols].values)
-
-# Scale only the target ("Return") separately
-scaler_target = MinMaxScaler()
-scaled_target = scaler_target.fit_transform(df_ticker[["Return"]].values)
+    return df, pred_prices, last_price, METRICS_PATH
 
 
-# =========================
-# Create dataset
-# =========================
-def create_dataset(dataset_all, dataset_target, look_back=1, horizon=1):
-    X, Y = [], []
-    for i in range(len(dataset_all) - look_back - horizon + 1):
-        X.append(dataset_all[i:(i + look_back), :])  # all features
-        Y.append(dataset_target[i + look_back : i + look_back + horizon, 0])  # target only
-    return np.array(X), np.array(Y)
+def display_results(TICKER, df, pred_prices, last_price, METRICS_PATH):
+    """
+    Display model predictions and metrics in Streamlit.
 
-X, Y = create_dataset(scaled_values, scaled_target, config.predict.look_back, config.predict.future_days)
+    Args:
+        TICKER (str): stock TICKER symbol (e.g., "AAPL")
+        df (pd.DataFrame): historical data with a "Close" column
+        pred_prices (np.ndarray): predicted prices for the next few days
+        last_price (float): last real closing price
+        metrics_path (str): path to the metrics JSON file
+    """
+    st.header(f"📈 Prediction Results for {TICKER}")
 
-# Train-test split
-split_index = int(len(X) * 0.8)
-trainX, testX = X[:split_index], X[split_index:]
-trainY, testY = Y[:split_index], Y[split_index:]
+    # --- Plot historical prices + predictions ---
+    st.subheader("Price Evolution and Predictions")
 
-trainX = trainX.reshape((trainX.shape[0], trainX.shape[1], len(feature_cols)))
-testX = testX.reshape((testX.shape[0], testX.shape[1], len(feature_cols)))
+    hist_days = 30  # number of past days to show
+    if "Close" in df.columns:
+        close_col = "Close"
+    else:
+        # cherche une colonne qui contient "Close" dans son nom
+        candidates = [c for c in df.columns if "Close" in str(c)]
+        if not candidates:
+            raise KeyError("Aucune colonne contenant 'Close' trouvée dans le DataFrame.")
+        close_col = candidates[0]
 
-# =========================
-# Build LSTM model
-# =========================
-n_features = len(feature_cols)
+    hist_data = df[close_col].iloc[-hist_days:].copy()
+    future_dates = pd.date_range(df.index[-1] + pd.Timedelta(days=1), periods=len(pred_prices))
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(hist_data.index, hist_data.values, label="Historical", linewidth=2)
+    ax.plot(future_dates, pred_prices, "--o", color="orange", label="Predictions", linewidth=2)
+    ax.axhline(y=last_price, color="gray", linestyle="--", alpha=0.5)
+    ax.legend()
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Price (USD)")
+    ax.set_title(f"Predicted Price for {TICKER}")
+    col1, col2 = st.columns([1, 2])
+    with col1:
+        st.pyplot(fig)
 
-model = Sequential([
-    LSTM(64, return_sequences=True, input_shape=(config.predict.look_back, n_features)),
-    Dropout(0.2),
-    LSTM(32),
-    Dropout(0.2),
-    Dense(config.predict.future_days)
-])
-model.compile(loss='huber', optimizer='adam')
+    # --- Prediction Table ---
+    st.subheader("Short-Term Predictions")
+    df_pred = pd.DataFrame({
+        "Day": [f"+{i}" for i in range(1, len(pred_prices) + 1)],
+        "Predicted Price (USD)": np.round(pred_prices, 2),
+        "Change (%)": np.round((pred_prices - last_price) / last_price * 100, 2),
+        "Direction": ["⬆️ Up" if p > last_price else "⬇️ Down" for p in pred_prices],
+    })
+    st.dataframe(df_pred, hide_index=True)
 
-# =========================
-# Train model with EarlyStopping
-# =========================
-early_stop = EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)
+    # --- Model Metrics ---
+    if os.path.exists(METRICS_PATH):
+        st.subheader("📊 Model Metrics")
+        with open(METRICS_PATH, "r") as f:
+            metrics = json.load(f)
 
-history = model.fit(
-    trainX, trainY,
-    epochs=config.LSTM.epochs,
-    batch_size=config.LSTM.batch_size,
-    validation_data=(testX, testY),
-    callbacks=[early_stop],
-    verbose=1
-)
+        df_metrics = pd.DataFrame({
+            "Horizon": [h for h in metrics if h.startswith("h")],
+            "MSE": [metrics[h]["mse"] for h in metrics if h.startswith("h")],
+            "MAE": [metrics[h]["mae"] for h in metrics if h.startswith("h")],
+            "R²": [metrics[h]["r2"] for h in metrics if h.startswith("h")]
+        })
 
-# =========================
-# Model evaluation
-# =========================
-test_pred = model.predict(testX)
-test_pred_rescaled = scaler_target.inverse_transform(test_pred)
-testY_rescaled = scaler_target.inverse_transform(testY)
+        # 🔧 Convert columns to float before formatting
+        for col in ["MSE", "MAE", "R²"]:
+            df_metrics[col] = pd.to_numeric(df_metrics[col], errors="coerce")
 
-mse = mean_squared_error(testY_rescaled, test_pred_rescaled)
-mae = mean_absolute_error(testY_rescaled, test_pred_rescaled)
-r2 = r2_score(testY_rescaled, test_pred_rescaled)
+        st.table(df_metrics.style.format({"MSE": "{:.4f}", "MAE": "{:.4f}", "R²": "{:.4f}"}))
 
-eval_metrics = {
-    "mse": float(mse),
-    "mae": float(mae),
-    "r2": float(r2)
-}
+    else:
+        st.warning(f"Metrics file not found: {METRICS_PATH}")
 
-# =========================
-# Future prediction
-# =========================
-last_sequence = scaled_values[-config.predict.look_back:].reshape(1, config.predict.look_back, n_features)
 
-# Predict future % changes (scaled)
-future_pct_changes = model.predict(last_sequence)
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python -m src.predict_stock <TICKER>")
+        sys.exit(1)
 
-# Inverse transform with the target scaler, not the full feature scaler
-future_pct_changes = scaler_target.inverse_transform(future_pct_changes).flatten()
-
-# Convert % changes to future prices
-last_close = df_ticker["Close"].iloc[-1]
-future_prices = [last_close]
-for pct in future_pct_changes:
-    future_prices.append(future_prices[-1] * (1 + pct / 100))
-future_prices = future_prices[1:]
-
-# =========================
-# Plot results
-# =========================
-os.makedirs("predict", exist_ok=True)
-future_dates = [df_ticker.index[-1] + pd.Timedelta(days=i+1) for i in range(config.predict.future_days)]
-
-plt.figure(figsize=(12, 6))
-plt.plot(df_ticker["Close"].tail(30).index, df_ticker["Close"].tail(30).values, label="Last 30 Days Actual", linewidth=2)
-plt.plot(future_dates, future_prices, label="Future Forecast (Reconstructed)", linestyle="--", color="red")
-plt.title(f"{ticker} Stock - Last 30 Days + {config.predict.future_days} Days Forecast")
-plt.xlabel("Date")
-plt.ylabel("Close Price ($)")
-plt.grid(True)
-plt.legend()
-plt.savefig(f"predict/{ticker}_forecast.png", bbox_inches="tight")
-plt.close()
-
-# =========================
-# Save results
-# =========================
-predicted_change_pct = np.sum(future_pct_changes)  # cumulative % change
-
-results = {
-    "ticker": ticker,
-    "company_name": get_company_name(ticker),
-    "last_close": float(last_close),
-    "predicted_change_pct": float(predicted_change_pct),
-    "future_pct_changes": [float(x) for x in future_pct_changes],
-    "future_prices": [float(x) for x in future_prices],
-    "evaluation": {k: float(v) for k, v in eval_metrics.items()}
-}
-with open(f"predict/{ticker}_results.json", "w") as f:
-    json.dump(results, f, indent=4)
-
-np.save(f"predict/{ticker}_forecast.npy", future_prices)
-
-logger.info(f"Results saved: predict/{ticker}_forecast.png and predict/{ticker}_results.json")
+    ticker = sys.argv[1]
+    df, pred_prices, last_price, METRICS_PATH = predict_stock(ticker)

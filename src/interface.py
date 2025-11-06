@@ -1,11 +1,15 @@
 import json
 import os
 import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import subprocess
 from PIL import Image
 import streamlit as st
 import pandas as pd
 import datetime
+
+from src.predict_utils import get_company_name
+from src.predict_stock import display_results, predict_stock
 
 st.set_page_config(page_title="Stock Prediction", layout="wide")
 st.title("📈 Stock Price Prediction")
@@ -17,38 +21,21 @@ if st.button("Predict"):
         st.warning("Please enter a ticker symbol.")
     else:
         with st.spinner("Running prediction model... This may take a while ⏳"):
-            proc = subprocess.run([sys.executable, "-m", "src.predict_stock", ticker],
-                                    capture_output=True, text=True)
+            proc = subprocess.run(
+                [sys.executable, "-m", "src.predict_stock", ticker],
+                capture_output=True,
+                text=True
+            )
 
+        # --- Check if the subprocess ran successfully ---
         if proc.returncode != 0:
-            st.error("❌ Prediction script failed")
+            st.error("❌ Prediction script failed.")
             st.text(proc.stderr)
             st.stop()
 
-        # Load JSON results
-        results_file = f"predict/{ticker}_results.json"
-        if os.path.exists(results_file):
-            with open(results_file) as f:
-                results = json.load(f)
+        # --- Get company name ---
+        company = get_company_name(ticker)
+        st.header(f"📊 Prediction for {company} ({ticker})")
 
-            st.subheader(f"{results['company_name']} ({results['ticker']})")
-
-            st.metric(
-                label="Predicted Change (%)",
-                value=f"{results['predicted_change_pct']:.2f}%",
-                delta=f"Last Close: ${results['last_close']:.2f}"
-            )
-            # show eval 
-            st.metric("Mean Absolute Error", f"{results['evaluation']['mae']:.2f}")
-            st.metric("Mean Squared Error", f"{results['evaluation']['mse']:.2f}")
-            st.metric("R² Score", f"{results['evaluation']['r2']:.2f}")
-            
-            # Show prediction chart
-            img_path = f"predict/{ticker}_forecast.png"
-            if os.path.exists(img_path):
-                st.image(img_path, caption=f"Forecast for {ticker}", width=700)
-            else:
-                st.error("Prediction figure not found.")
-
-        else:
-            st.error("Prediction results not found. Make sure predict_stock.py ran successfully.")
+        df, preds, last_price, metrics_path = predict_stock(ticker)
+        display_results(ticker, df, preds, last_price, metrics_path)
