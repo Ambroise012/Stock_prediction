@@ -3,7 +3,9 @@
 
 ## Overview
 
-This script fetches historical and up-to-date stock data for a given ticker symbol, preprocesses the data, trains an LSTM (Long Short-Term Memory) model to predict future stock prices, and visualizes the results. The script uses both Yahoo Finance and Marketstack APIs to ensure comprehensive and current data.
+This script fetches historical and up-to-date stock data for a given ticker symbol, preprocesses the data, trains an GRU model to predict future stock prices, and visualizes the results. The script uses both Yahoo Finance and Marketstack APIs to ensure comprehensive and current data.
+
+Predict 5 days ahead
 
 ---
 
