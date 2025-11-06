@@ -11,6 +11,8 @@ import requests
 import yfinance as yf
 import numpy as np
 import pandas as pd
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -136,34 +138,129 @@ def get_company_name(ticker: str) -> str:
     except Exception:
         return ticker
 
+def download_data(ticker, period="10y", interval="1d"):
+    df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
+    if df.empty:
+        raise RuntimeError(f"No data for {ticker}")
+    return df
 
-def fetch_stock_data(ticker: str):
-    """Fetch OHLCV data from Yahoo Finance only."""
-    company_name = get_company_name(ticker)
-    logger.info(f"Fetching data for {company_name} ({ticker})...")
+def add_features(df):
+    """
+    Ajoute features utiles :
+    - log_close, log_volume
+    - lags of log_close & log_vol
+    - rolling means/std
+    - RSI (14), simple MACD approximation, momentum
+    """
+    df = df.copy()
+    df["log_close"] = np.log(df["Close"])
+    df["log_vol"] = np.log(df["Volume"].replace(0, np.nan)).fillna(0)
 
-    df_yf = yf.download(ticker, period="max", interval="1d", auto_adjust=False)
+    # lags
+    for lag in [1,2,3,5,10,21]:
+        df[f"lag_logc_{lag}"] = df["log_close"].shift(lag)
+        df[f"lag_logv_{lag}"] = df["log_vol"].shift(lag)
 
-    if df_yf.empty:
-        logger.warning(f"No Yahoo Finance data found for {ticker}")
-        return None
+    # rolling stats
+    for w in [5,10,21,60]:
+        df[f"roll_mean_{w}"] = df["log_close"].rolling(window=w).mean()
+        df[f"roll_std_{w}"] = df["log_close"].rolling(window=w).std()
 
-    df_yf = df_yf[["Open", "High", "Low", "Close", "Volume"]]
-    first_date = df_yf.index.min().date()
-    last_date = df_yf.index.max().date()
-    count = len(df_yf)
+    # momentum
+    df["mom_5"] = df["log_close"] - df["log_close"].shift(5)
+    df["mom_21"] = df["log_close"] - df["log_close"].shift(21)
 
-    logger.info(
-        f"Yahoo Finance: Extracted {count} rows for {ticker} "
-        f"from {first_date} to {last_date}"
-    )
+    # simple MACD-like (ema diff)
+    df["ema12"] = df["Close"].ewm(span=12, adjust=False).mean()
+    df["ema26"] = df["Close"].ewm(span=26, adjust=False).mean()
+    df["macd"] = df["ema12"] - df["ema26"]
 
-    return df_yf
+    # RSI (14)
+    delta = df["Close"].diff()
+    up = delta.clip(lower=0)
+    down = -1 * delta.clip(upper=0)
+    roll_up = up.rolling(14).mean()
+    roll_down = down.rolling(14).mean()
+    rs = roll_up / (roll_down + 1e-9)
+    df["rsi_14"] = 100 - (100 / (1 + rs))
+
+    df = df.dropna().copy()
+    return df
+
+def inverse_cum_logret_to_price(last_price, cum_logret_preds):
+    return last_price * np.exp(cum_logret_preds)
 
 
-def create_dataset(dataset, look_back=1):
-    X, Y = [], []
-    for i in range(len(dataset) - look_back):
-        X.append(dataset[i:(i + look_back), 0])
-        Y.append(dataset[i + look_back, 0])
-    return np.array(X), np.array(Y)
+# -----------------------------
+# Train only
+# -----------------------------
+def build_targets(df, horizon):
+    """
+    Calcule les rendements log cumulés futurs sur 1..horizon jours.
+    Exemple : cum_logret_h3 = log_ret[t+1] + log_ret[t+2] + log_ret[t+3]
+    """
+    df = df.copy()
+    df["log_ret"] = df["log_close"].diff()
+
+    for h in range(1, horizon + 1):
+        # Somme des rendements sur les h prochains jours (pas les passés)
+        df[f"cum_logret_h{h}"] = df["log_ret"].shift(-1).rolling(window=h).sum().shift(-(h - 1))
+
+    # Supprime les lignes avec NaN en fin de série (prévisions impossibles)
+    df = df.dropna().reset_index(drop=True)
+    return df
+
+def create_supervised_arrays(df, feature_cols, horizon, look_back):
+    X_list, Y_list, last_obs_price = [], [], []
+    arr = df[feature_cols].values
+    n = len(df)
+    for end_idx in range(look_back - 1, n - horizon):
+        start_idx = end_idx - (look_back - 1)
+        X_seq = arr[start_idx:end_idx+1, :]
+        y = [df.iloc[end_idx + h][f"cum_logret_h{h}"] for h in range(1, horizon + 1)]
+        X_list.append(X_seq)
+        Y_list.append(y)
+        last_obs_price.append(np.exp(df.iloc[end_idx]["log_close"]))
+    return np.array(X_list), np.array(Y_list), np.array(last_obs_price)
+
+def flatten_tabular_from_seq(X):
+    """
+    Simple flattening for tabular model:
+    - last row features concatenated with mean and std across lookback
+    """
+    last = X[:, -1, :]
+    mean = X.mean(axis=1)
+    std = X.std(axis=1)
+    return np.concatenate([last, mean, std], axis=1)
+
+def inverse_cum_logret_to_price(last_price, cum_logret_preds):
+    """
+    last_price: (n_samples,) price at t0
+    cum_logret_preds: (n_samples, horizon) predicted cumulative log returns
+    returns predicted prices shape (n_samples, horizon)
+    """
+    return last_price.reshape(-1,1) * np.exp(cum_logret_preds)
+
+def per_horizon_metrics(true_prices, pred_prices):
+    res = {}
+    for h in range(true_prices.shape[1]):
+        res[f"h{h+1}"] = {
+            "mse": float(mean_squared_error(true_prices[:, h], pred_prices[:, h])),
+            "mae": float(mean_absolute_error(true_prices[:, h], pred_prices[:, h])),
+            "r2": float(r2_score(true_prices[:, h], pred_prices[:, h]))
+        }
+    return res
+
+def directional_accuracy(true_prices, pred_prices, last_obs_prices):
+    """
+    Compute directional accuracy compared to last observed price:
+    direction = sign(price_t+h - price_t0)
+    return dict per horizon + overall
+    """
+    true_dir = np.sign(true_prices - last_obs_prices.reshape(-1,1))
+    pred_dir = np.sign(pred_prices - last_obs_prices.reshape(-1,1))
+    accs = {}
+    for i in range(true_prices.shape[1]):
+        accs[f"h{i+1}"] = float(np.mean(true_dir[:, i] == pred_dir[:, i]))
+    accs["overall"] = float(np.mean(true_dir == pred_dir))
+    return accs

@@ -4,8 +4,10 @@
         "batch_size": 32
     },
     "predict":{
-        "look_back": 30,
-        "future_days": 4
-
+        "look_back": 60,
+        "horizon": 5,
+        "n_splits":0.8,
+        "min_train_size": 365,
+        "random_seed": 42
     }
 }
