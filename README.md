@@ -76,15 +76,7 @@ E.g. of ticker:
 - SAN.PA : Sanofi
 - GE : General Electric
 - IBM : IBM
-
 ---
 
-## Output
-
-- The script saves a plot of the last 30 days of actual stock prices and the forecasted prices for the next N days in the `predict/` directory.
-- The plot is saved as `{ticker}_forecast.png`.
- 
-See interface at: `http://172.26.212.169:8501`
----
 
 
