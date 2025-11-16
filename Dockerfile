@@ -2,16 +2,15 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir poetry
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential gcc g++ \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml poetry.lock* /app/
-
-RUN poetry config virtualenvs.create false \
-    && poetry install --no-root --no-interaction --no-ansi
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY /src /app/src
-COPY .env /app/.env
-
+COPY /models/ /app/models
 
 # Streamlit port
 EXPOSE 8501

@@ -13,6 +13,9 @@ from src.config import config
 from src.predict_utils import download_data, add_features
 
 def inverse_cum_logret_to_price(last_price, cum_logret_preds):
+    """
+    convertir les prédictions du modèle (des rendements logarithmiques cumulés) en prix réels
+    """
     return last_price * np.exp(cum_logret_preds)
 
 def predict_stock(TICKER: str):
@@ -83,8 +86,6 @@ def display_results(TICKER, df, pred_prices, last_price, METRICS_PATH):
         last_price (float): last real closing price
         metrics_path (str): path to the metrics JSON file
     """
-    st.header(f"📈 Prediction Results for {TICKER}")
-
     # --- Plot historical prices + predictions ---
     st.subheader("Price Evolution and Predictions")
 
@@ -136,7 +137,7 @@ def display_results(TICKER, df, pred_prices, last_price, METRICS_PATH):
             "R²": [metrics[h]["r2"] for h in metrics if h.startswith("h")]
         })
 
-        # 🔧 Convert columns to float before formatting
+        # Convert columns to float before formatting
         for col in ["MSE", "MAE", "R²"]:
             df_metrics[col] = pd.to_numeric(df_metrics[col], errors="coerce")
 

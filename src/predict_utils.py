@@ -146,7 +146,7 @@ def download_data(ticker, period="10y", interval="1d"):
 
 def add_features(df):
     """
-    Ajoute features utiles :
+    Ajoute features :
     - log_close, log_volume
     - lags of log_close & log_vol
     - rolling means/std
@@ -196,21 +196,24 @@ def inverse_cum_logret_to_price(last_price, cum_logret_preds):
 # -----------------------------
 def build_targets(df, horizon):
     """
-    Calcule les rendements log cumulés futurs sur 1..horizon jours.
-    Exemple : cum_logret_h3 = log_ret[t+1] + log_ret[t+2] + log_ret[t+3]
+    Calcule les rendements log cumulés futurs sur horizon jours.
+    cum_logret_h3 = log_ret[t+1] + log_ret[t+2] + log_ret[t+3]
     """
     df = df.copy()
     df["log_ret"] = df["log_close"].diff()
 
     for h in range(1, horizon + 1):
-        # Somme des rendements sur les h prochains jours (pas les passés)
+        # Somme des rendements sur les h prochains jours
         df[f"cum_logret_h{h}"] = df["log_ret"].shift(-1).rolling(window=h).sum().shift(-(h - 1))
 
-    # Supprime les lignes avec NaN en fin de série (prévisions impossibles)
+    # Supprime les lignes avec NaN en fin de série
     df = df.dropna().reset_index(drop=True)
     return df
 
 def create_supervised_arrays(df, feature_cols, horizon, look_back):
+    """
+    découpe la série en séquences glissantes
+    """
     X_list, Y_list, last_obs_price = [], [], []
     arr = df[feature_cols].values
     n = len(df)
