@@ -1,15 +1,15 @@
 import subprocess
 import numpy as np
 import pandas as pd
-import yfinance as yf
 import streamlit as st
-import tensorflow as tf
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 import os, sys
 import json
+import torch
 
 from src.config import config
+from src.model import StockLSTM, load_lstm_model, predict_lstm
 from src.predict_utils import download_data, add_features
 
 def inverse_cum_logret_to_price(last_price, cum_logret_preds):
@@ -21,7 +21,7 @@ def predict_stock(TICKER: str):
     HORIZON = config.predict.horizon
     MODELDIR = "models"
 
-    MODEL_PATH = os.path.join(MODELDIR, f"{TICKER}_gru.h5")
+    MODEL_PATH = os.path.join(MODELDIR, f"{TICKER}_lstm.pt")
     METRICS_PATH = os.path.join(MODELDIR, f"{TICKER}_metrics.json")
     SCALER_MEAN = os.path.join(MODELDIR, f"{TICKER}_scaler_mean.npy")
     SCALER_SCALE = os.path.join(MODELDIR, f"{TICKER}_scaler_scale.npy")
@@ -32,7 +32,6 @@ def predict_stock(TICKER: str):
     if not os.path.exists(MODEL_PATH):
         subprocess.run([sys.executable, "-m", "src.train", TICKER], check=True)
 
-    model = tf.keras.models.load_model(MODEL_PATH)
     scaler = StandardScaler()
     scaler.mean_ = np.load(SCALER_MEAN)
     scaler.scale_ = np.load(SCALER_SCALE)
@@ -41,7 +40,7 @@ def predict_stock(TICKER: str):
     # download last days and prep features
     # ----------------------------
     df = download_data(TICKER)
-    df = add_features(df)
+    df = add_features(df, TICKER, config.data.text_dir)
 
     try:
         last_price = float(df["Close"].iloc[-1])
@@ -55,7 +54,16 @@ def predict_stock(TICKER: str):
     else:
         df.columns = [str(c) for c in df.columns]
 
-    exclude = {"Open", "High", "Low", "Close", "Adj Close", "log_close", "log_ret"}
+    exclude = {
+        "Open",
+        "High",
+        "Low",
+        "Close",
+        "Adj Close",
+        "log_close",
+        "log_ret",
+        "sentiment_text",
+    }
     feature_cols = [c for c in df.columns if c not in exclude and not c.startswith("cum_logret_h")]
     feature_cols = sorted(feature_cols)
 
@@ -63,10 +71,8 @@ def predict_stock(TICKER: str):
     arr = latest[feature_cols].values
     X_input_s = scaler.transform(arr).reshape(1, LOOK_BACK, len(feature_cols))
 
-    # ----------------------------
-    # predict
-    # ----------------------------
-    pred_cum_logret = model.predict(X_input_s, verbose=0)[0]
+    model = load_lstm_model(MODEL_PATH, input_size=len(feature_cols), horizon=HORIZON)
+    pred_cum_logret = predict_lstm(model, X_input_s)[0]
     pred_prices = inverse_cum_logret_to_price(last_price, pred_cum_logret)
 
     return df, pred_prices, last_price, METRICS_PATH

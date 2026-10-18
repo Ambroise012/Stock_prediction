@@ -1,0 +1,17 @@
+Metadata-Version: 2.4
+Name: projet_prediction_stocks
+Version: 0.1.0
+Summary: Stock prediction project with LSTM
+Author: Ambroise012
+Requires-Python: <4.0,>=3.10
+Requires-Dist: requests<3.0.0,>=2.32.3
+Requires-Dist: yfinance<0.3.0,>=0.2.44
+Requires-Dist: numpy<2.0.0,>=1.26.4
+Requires-Dist: pandas<3.0.0,>=2.2.3
+Requires-Dist: matplotlib<4.0.0,>=3.9.2
+Requires-Dist: scikit-learn<2.0.0,>=1.5.2
+Requires-Dist: python-dotenv<2.0.0,>=1.1.1
+Requires-Dist: streamlit<2.0.0,>=1.49.1
+Requires-Dist: transformers<5.0.0,>=4.46.3
+Requires-Dist: torch>=2.14.1
+Requires-Dist: sentencepiece>=0.2.2

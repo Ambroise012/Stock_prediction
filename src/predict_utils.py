@@ -6,12 +6,14 @@ import random
 import json
 import logging
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import requests
 import yfinance as yf
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from src.sentiment import build_sentiment_features
 
 
 logger = logging.getLogger(__name__)
@@ -139,12 +141,30 @@ def get_company_name(ticker: str) -> str:
         return ticker
 
 def download_data(ticker, period="10y", interval="1d"):
-    df = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
-    if df.empty:
-        raise RuntimeError(f"No data for {ticker}")
-    return df
+    try:
+        df = yf.download(
+            ticker,
+            period=period,
+            interval=interval,
+            progress=False,
+            auto_adjust=True,
+        )
+        if not df.empty:
+            return df
+    except Exception as error:
+        logger.warning("Yahoo Finance unavailable for %s: %s", ticker, error)
 
-def add_features(df):
+    local_path = Path(__file__).parent.parent / "stock_data" / f"{ticker}.csv"
+    if local_path.exists():
+        logger.warning("Using local historical data: %s", local_path)
+        local_data = pd.read_csv(local_path, parse_dates=["Date"])
+        return local_data.set_index("Date").sort_index()
+
+    raise RuntimeError(
+        f"No data for {ticker}. Yahoo Finance failed and {local_path} was not found."
+    )
+
+def add_features(df, ticker=None, text_dir="data/text"):
     """
     Ajoute features utiles :
     - log_close, log_volume
@@ -153,6 +173,14 @@ def add_features(df):
     - RSI (14), simple MACD approximation, momentum
     """
     df = df.copy()
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [str(col[0]) for col in df.columns]
+    if ticker:
+        sentiment = build_sentiment_features(df.index, ticker, text_dir)
+        df = df.join(sentiment)
+    else:
+        df["sentiment_score"] = 0.0
+        df["sentiment_volume"] = 0.0
     df["log_close"] = np.log(df["Close"])
     df["log_vol"] = np.log(df["Volume"].replace(0, np.nan)).fillna(0)
 
@@ -214,10 +242,10 @@ def create_supervised_arrays(df, feature_cols, horizon, look_back):
     X_list, Y_list, last_obs_price = [], [], []
     arr = df[feature_cols].values
     n = len(df)
-    for end_idx in range(look_back - 1, n - horizon):
+    for end_idx in range(look_back - 1, n):
         start_idx = end_idx - (look_back - 1)
         X_seq = arr[start_idx:end_idx+1, :]
-        y = [df.iloc[end_idx + h][f"cum_logret_h{h}"] for h in range(1, horizon + 1)]
+        y = [df.iloc[end_idx][f"cum_logret_h{h}"] for h in range(1, horizon + 1)]
         X_list.append(X_seq)
         Y_list.append(y)
         last_obs_price.append(np.exp(df.iloc[end_idx]["log_close"]))
