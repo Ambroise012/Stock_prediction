@@ -9,5 +9,8 @@
         "n_splits":0.8,
         "min_train_size": 365,
         "random_seed": 42
+    },
+    "data":{
+        "text_dir": "data/text"
     }
 }

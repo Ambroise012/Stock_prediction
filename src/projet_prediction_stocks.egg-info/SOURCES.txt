@@ -1,0 +1,16 @@
+README.md
+pyproject.toml
+src/__init__.py
+src/config.py
+src/interface.py
+src/main.py
+src/model.py
+src/predict_stock.py
+src/predict_utils.py
+src/sentiment.py
+src/train.py
+src/projet_prediction_stocks.egg-info/PKG-INFO
+src/projet_prediction_stocks.egg-info/SOURCES.txt
+src/projet_prediction_stocks.egg-info/dependency_links.txt
+src/projet_prediction_stocks.egg-info/requires.txt
+src/projet_prediction_stocks.egg-info/top_level.txt
